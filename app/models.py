@@ -119,6 +119,53 @@ class ExportOpenApiRequest(BaseModel):
     routes: list[RouteIn] = Field(..., description="按注册顺序排列的路由")
 
 
+class PublishRoutesRequest(BaseModel):
+    routes: list[RouteIn] = Field(..., description="按注册顺序排列的候选路由")
+    expected_version: int = Field(
+        ...,
+        ge=0,
+        description="乐观锁：发布所基于的当前活动版本；不一致时拒绝发布",
+    )
+
+
+class PublishRoutesResponse(BaseModel):
+    published: bool = Field(description="true=已替换活动版本；false=校验失败或版本冲突")
+    version: int = Field(description="发布成功时为新版本号；失败时为当前活动版本")
+    detail: Optional[str] = Field(
+        default=None, description="版本冲突时的原因；校验失败按下列字段逐项报告"
+    )
+    routes: Optional[list[RouteOut]] = Field(
+        default=None, description="发布成功时，新活动版本的路由审计视图"
+    )
+    audit: Optional[AnalyzeResponse] = Field(
+        default=None, description="发布成功时，新活动版本的冲突审计结果"
+    )
+    paths: Optional[dict[str, Any]] = Field(
+        default=None, description="发布成功时，新活动版本的 OpenAPI 3.1 paths 片段"
+    )
+    parse_errors: Optional[list[ParseError]] = Field(
+        default=None,
+        description="校验失败：审计或导出侧报告的解析错误（含原始下标）",
+    )
+    duplicate_routes: Optional[list[ParseError]] = Field(
+        default=None, description="校验失败：导出路径重复的路由（含原始下标）"
+    )
+    full_shadows: Optional[list[Conflict]] = Field(
+        default=None, description="校验失败：审计结果中的 full_shadow 冲突"
+    )
+
+
+class ActiveSnapshotResponse(BaseModel):
+    version: int = Field(description="当前活动版本号；初始为 0")
+    routes: list[RouteOut] = Field(description="当前活动版本的路由（审计视图）")
+    audit: AnalyzeResponse = Field(description="与 routes 同一快照计算的冲突审计结果")
+    paths: dict[str, Any] = Field(
+        description="与 routes 同一快照导出的 OpenAPI 3.1 paths 片段"
+    )
+
+    model_config = {"extra": "ignore"}
+
+
 class ExportOpenApiResponse(BaseModel):
     paths: dict[str, Any] = Field(
         default_factory=dict,

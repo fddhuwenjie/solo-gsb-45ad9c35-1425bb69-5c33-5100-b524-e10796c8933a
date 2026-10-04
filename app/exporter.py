@@ -25,6 +25,10 @@ from .templates import Param, Segment, Static, TemplateError, parse_template
 WILDCARD_PARAM_NAME = "wildcard"
 WILDCARD_EXTENSION = "x-route-wildcard"
 
+#: 导出路径重复错误信息的固定前缀。发布校验据此把"导出路径重复"
+#: 与普通解析错误区分开（显式输入的 /export-openapi 行为不变）。
+DUPLICATE_ROUTE_ERROR_PREFIX = "duplicate route:"
+
 # 参数约束 -> JSON Schema。经 register_constraint 注册的自定义约束
 # 回退为通用 string。
 _CONSTRAINT_SCHEMAS: dict[str, dict] = {
@@ -184,8 +188,9 @@ def export_openapi_fragment(items: list[RouteIn]) -> ExportOpenApiResponse:
                     method=method,
                     template=item.path,
                     error=(
-                        f"duplicate route: {method} {path} already exported from "
-                        f"index {seen[key]}; keeping the first registration"
+                        f"{DUPLICATE_ROUTE_ERROR_PREFIX} {method} {path} already "
+                        f"exported from index {seen[key]}; keeping the first "
+                        "registration"
                     ),
                 )
             )

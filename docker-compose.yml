@@ -6,9 +6,15 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    volumes:
+      # 活动版本快照落盘目录；容器重启/重建后已发布版本仍可读取
+      - route-audit-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 3s
+
+volumes:
+  route-audit-data:

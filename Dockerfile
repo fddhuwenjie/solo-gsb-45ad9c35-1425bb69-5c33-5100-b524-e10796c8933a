@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=appuser:appuser app ./app
 
+# 活动版本快照持久化目录（由 ROUTE_AUDIT_DATA_DIR 指定，默认 /data）
+RUN mkdir --parents /data && chown appuser:appuser /data
+
 USER appuser
 
 EXPOSE 8000

@@ -20,6 +20,16 @@ URL 解码与规范化模型上模拟路由器匹配，判定：
   `int` / `uuid` / `slug` 约束并做 RFC 3986 单段百分号编码，返回每条路由可直接
   调用的 canonical path（末尾 `**` 接收可为空的段数组）。
 
+此外提供**活动配置发布**能力：
+
+- `POST /publish`：提交按注册顺序排列的路由与**期望版本号**，服务对同一候选集
+  同时运行冲突审计与 OpenAPI 导出；解析错误、导出路径重复或存在 `full_shadow`
+  一律拒绝（携带原始下标），通过后**原子替换**活动路由并把版本号加一。期望版本
+  过期返回 **409**，相同期望版本的两个并发发布只有一个成功（乐观并发控制）。
+- `GET /active`：读取当前活动版本，路由、审计结果与 OpenAPI `paths` **来自同一份
+  快照**；初始为版本 `0`、路由为空。快照持久化在数据目录，**容器重启后仍可读到
+  已发布版本**。
+
 结果按「胜方优先级 → 方法 → 胜方规范化路径 → 原始下标」稳定排序。
 
 ---
@@ -132,7 +142,157 @@ curl -s -X POST http://localhost:8000/render-paths \
 
 ---
 
-## 路径模板语法
+## 发布与读取活动版本
+
+`/analyze`、`/export-openapi`、`/render-paths` 都是**无状态**的显式输入接口，
+行为保持不变；活动配置由独立的 `/publish` 与 `/active` 管理。
+
+### 读取活动版本
+
+```bash
+curl -s http://localhost:8000/active
+```
+
+初始（从未发布过）时返回版本 `0`、路由为空，`audit` 与 `paths` 是该空集的
+同一快照产物：
+
+```json
+{
+  "version": 0,
+  "routes": [],
+  "audit": {"routes": [], "parse_errors": [], "conflicts": [],
+            "suggested_order": [],
+            "summary": {"total": 0, "valid": 0, "parse_errors": 0,
+                        "conflicts": 0, "full_shadows": 0, "duplicates": 0,
+                        "partial_overlaps": 0, "unprovable": 0,
+                        "shadowed_routes": 0}},
+  "paths": {}
+}
+```
+
+`routes`、`audit`、`paths` 三者**来自同一份快照**，不会出现旧路由搭配新导出
+片段的拼接结果。
+
+### 发布新版本
+
+发布请求提交**按注册顺序**排列的路由与所基于的当前版本（乐观锁）：
+
+```bash
+curl -s -X POST http://localhost:8000/publish \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expected_version": 0,
+    "routes": [
+      {"method": "GET", "path": "/users/{id:int}", "id": "get-user", "priority": 0},
+      {"method": "GET", "path": "/users/me",       "id": "get-me",  "priority": 0},
+      {"method": "POST", "path": "/users",         "id": "create-user"}
+    ]
+  }'
+```
+
+校验通过且期望版本等于当前版本时，**原子替换活动路由、版本加一**，响应回传新版本
+的路由视图、审计结果与 OpenAPI `paths`：
+
+```json
+{
+  "published": true,
+  "version": 1,
+  "detail": null,
+  "routes": [ {"id": "get-user", "...": "..."}, {"id": "get-me", "...": "..."},
+              {"id": "create-user", "...": "..."} ],
+  "audit": { "...": "与 /analyze 同构的完整审计结果..." },
+  "paths": {
+    "/users":      {"post": {"operationId": "create-user", "...": "..."}},
+    "/users/{id}": {"get":  {"operationId": "get-user", "...": "..."}},
+    "/users/me":   {"get":  {"operationId": "get-me", "...": "..."}}
+  },
+  "parse_errors": null,
+  "duplicate_routes": null,
+  "full_shadows": null
+}
+```
+
+之后再读 `GET /active` 即得到版本 `1` 的同一份快照。
+
+### 校验失败：返回原始下标，活动版本不变
+
+服务对候选集**同时**运行现有冲突审计与 OpenAPI 导出，任一情况出现都拒绝发布
+（HTTP 仍为 200，`published=false`），并按类别返回请求数组中的**原始下标**：
+
+| 拒绝字段 | 含义 |
+| --- | --- |
+| `parse_errors` | 审计或导出侧报告的解析错误（非法模板、不支持的方法、保留参数名等），按下标去重排序 |
+| `duplicate_routes` | 导出侧报告的**导出路径重复**（如 `/x/{id:int}` 与 `/x/{id:uuid}` 同为 `/x/{id}`） |
+| `full_shadows` | 审计结果中 `status=proven` 的 `full_shadow` 冲突（含胜/负方原始下标与 witness） |
+
+```bash
+curl -s -X POST http://localhost:8000/publish \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expected_version": 1,
+    "routes": [
+      {"method": "GET", "path": "/x/{id:int}"},
+      {"method": "GET", "path": "/x/{id:uuid}"}
+    ]
+  }'
+```
+
+```json
+{
+  "published": false,
+  "version": 1,
+  "detail": null,
+  "parse_errors": [],
+  "duplicate_routes": [
+    {"index": 1, "method": "GET", "template": "/x/{id:uuid}",
+     "error": "duplicate route: GET /x/{id} already exported from index 0; ..."}
+  ],
+  "full_shadows": []
+}
+```
+
+### 版本冲突：相同期望版本只有一个成功
+
+期望版本与当前版本不一致时返回 **409 Conflict** 与当前版本号；**活动版本和已发布
+内容不会被旧提交覆盖**。调用方应重新读取 `/active`、按最新版本重试：
+
+```bash
+curl -s -i -X POST http://localhost:8000/publish \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version": 0, "routes": [{"method": "GET", "path": "/other"}]}'
+```
+
+```http
+HTTP/1.1 409 Conflict
+```
+
+```json
+{
+  "published": false,
+  "version": 1,
+  "detail": "expected_version 0 no longer matches current version 1; re-read /active and retry"
+}
+```
+
+因此两个使用**同一期望版本**的并发发布，恰好一个 `200 published=true` 并把版本
+加一，另一个得到 `409` 与新版本号；下一次发布必须以新版本号为期望版本。
+
+### 持久化与数据保留
+
+- 活动快照（版本、路由原始输入、审计结果、OpenAPI `paths`）在发布时整体写入数据
+  目录中的 `active-routes.json`（临时文件 + fsync + 原子替换），容器重启后自动
+  从该文件恢复；
+- `docker compose up --build` 使用命名卷 `route-audit-data` 挂载到容器内
+  `/data`，**重建容器后数据保留**；
+- 非 Docker 运行时可用环境变量 `ROUTE_AUDIT_DATA_DIR` 指定数据目录（默认为
+  `/data`），例如：
+
+  ```bash
+  ROUTE_AUDIT_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
+  ```
+
+---
+
 
 模板必须以 `/` 开头，由 `/` 分隔的段构成：
 
@@ -255,6 +415,50 @@ curl -s -X POST http://localhost:8000/render-paths \
 ### `GET /healthz`
 
 返回 `{"status": "ok"}`，供容器健康检查使用。
+
+### `POST /publish`
+
+把候选路由集校验后**原子发布**为新的活动版本。请求体在 `/analyze` 的基础上增加
+`expected_version`（非负整数，乐观锁）：
+
+```json
+{
+  "expected_version": 0,
+  "routes": [
+    {"method": "GET", "path": "/users/{id:int}", "priority": 0, "id": "get-user"}
+  ]
+}
+```
+
+处理规则：
+
+1. 对同一 `routes` 同时运行冲突审计（同 `/analyze`）与 OpenAPI 导出
+   （同 `/export-openapi`）；
+2. 任一侧存在解析错误、导出侧存在导出路径重复、或审计存在 proven 的
+   `full_shadow` 时，返回 **200** 且 `published=false`，并在 `parse_errors`、
+   `duplicate_routes`、`full_shadows` 中分别给出**原始下标**；活动版本不变；
+3. 校验通过但 `expected_version` 不等于当前版本：返回 **409**，响应体
+   `published=false`、`version` 为当前版本、`detail` 说明原因；
+4. 校验通过且版本匹配：返回 **200**，`published=true`、`version` 为递增后的
+   新版本，并回传该版本的 `routes`（审计视图）、`audit` 与 `paths`。
+
+注意：`duplicate`（两条路由可达集合完全相同）不属于发布拒绝条件；只有
+`full_shadow`（存在永远无法命中的负方）才拒绝。信封级校验失败（缺少字段、
+`expected_version` 为负数等）返回 **422**。
+
+### `GET /active`
+
+读取当前活动版本。响应：
+
+| 字段 | 说明 |
+| --- | --- |
+| `version` | 当前活动版本号；初始为 `0`，每次成功发布加一 |
+| `routes` | 活动路由的审计视图（与 `/analyze` 响应中的 `routes[]` 同构） |
+| `audit` | 与 `routes` 同一快照的完整审计结果（同 `/analyze` 响应） |
+| `paths` | 与 `routes` 同一快照的 OpenAPI 3.1 `paths` 片段 |
+
+三个字段保证来自同一份不可变快照。服务首次启动（数据目录中无快照文件）时为
+版本 `0`、路由为空；之后从持久化文件恢复，容器重启不丢失。
 
 ### `POST /export-openapi`
 
@@ -438,10 +642,12 @@ app/
   analyzer.py        # 可达集合相交、覆盖关系、最短 witness、往返校验
   service.py         # 编排：解析分组、成对判定、稳定排序、建议顺序、汇总
   exporter.py        # 路由配置 -> OpenAPI 3.1 paths 片段（参数 schema、operationId）
+  publishing.py      # 发布校验：同一候选集的审计 + 导出汇总（解析错误/重复/full_shadow）
+  store.py           # 活动版本快照存储：CAS 并发控制、原子落盘、重启恢复
   render.py          # 按模板与参数值反向生成 canonical path（约束校验、单段编码）
   models.py          # Pydantic 请求/响应模型
-  main.py            # FastAPI 路由：/analyze、/export-openapi、/render-paths、/healthz
-tests/               # pytest 测试（规范化、模板、相交、API、导出、反向渲染、unprovable）
+  main.py            # FastAPI 路由：/analyze、/export-openapi、/render-paths、/healthz、/publish、/active
+tests/               # pytest 测试（规范化、模板、相交、API、导出、反向渲染、unprovable、发布/并发/持久化）
 Dockerfile
 docker-compose.yml
 requirements.txt / requirements-dev.txt
