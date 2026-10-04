@@ -193,3 +193,45 @@ class RenderPathsResponse(BaseModel):
     results: list[RenderPathResult] = Field(
         ..., description="与输入 routes 等长、顺序一致的逐条结果"
     )
+
+
+PublishStatus = Literal["published", "rejected", "version_conflict"]
+
+
+class PublishRequest(BaseModel):
+    routes: list[RouteIn] = Field(..., description="按注册顺序排列的候选路由")
+    expected_version: int = Field(
+        ..., ge=0, description="期望的当前活动版本号（CAS：必须等于当前版本才会发布）"
+    )
+
+
+class PublishResponse(BaseModel):
+    status: PublishStatus = Field(
+        description=(
+            "published=已原子替换并递增版本；rejected=校验未通过，活动版本不变；"
+            "version_conflict=预期版本与当前版本不一致，未覆盖已发布内容"
+        )
+    )
+    version: int = Field(description="操作完成后的当前活动版本号")
+    parse_errors: list[ParseError] = Field(
+        default_factory=list,
+        description="rejected 时：审计与导出两侧报告的解析错误/重复导出路径（含原始下标）",
+    )
+    conflicts: list[Conflict] = Field(
+        default_factory=list,
+        description="rejected 时：审计发现的 full_shadow 冲突（含双方原始下标）",
+    )
+
+
+class ActiveResponse(BaseModel):
+    version: int = Field(..., description="当前活动版本号；初始为 0")
+    routes: list[RouteIn] = Field(
+        default_factory=list, description="发布时提交的路由（按注册顺序）"
+    )
+    audit: AnalyzeResponse = Field(
+        ..., description="发布时对同一路由集运行的冲突审计结果"
+    )
+    openapi_paths: dict[str, Any] = Field(
+        default_factory=dict,
+        description="发布时生成的可嵌入 OpenAPI 3.1 的 paths 片段",
+    )

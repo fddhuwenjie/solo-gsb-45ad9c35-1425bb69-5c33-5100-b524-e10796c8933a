@@ -6,7 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # 容器内以非 root 用户运行
-RUN useradd --create-home --no-log-init --uid 10001 appuser
+RUN useradd --create-home --no-log-init --uid 10001 appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
 
 WORKDIR /app
 

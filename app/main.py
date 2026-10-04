@@ -6,13 +6,17 @@ from fastapi import FastAPI
 
 from .exporter import export_openapi_fragment
 from .models import (
+    ActiveResponse,
     AnalyzeRequest,
     AnalyzeResponse,
     ExportOpenApiRequest,
     ExportOpenApiResponse,
+    PublishRequest,
+    PublishResponse,
     RenderPathsRequest,
     RenderPathsResponse,
 )
+from .publish import PublishStore
 from .render import render_paths
 from .service import analyze_routes
 
@@ -22,9 +26,14 @@ app = FastAPI(
         "按注册顺序接收路由模板，判定同方法路由的可达集合是否相交、谁遮蔽谁，"
         "并构造最短稳定的示例路径；也可把路由配置导出为可嵌入 OpenAPI 3.1 的 "
         "paths 片段，或按模板与参数值反向生成可调用的 canonical path。"
+        "支持把校验通过的路由配置发布为可持久化的活动版本（CAS 递增），"
+        "并从同一快照读取路由、审计结果与 OpenAPI paths。"
     ),
     version="1.0.0",
 )
+
+#: 活动版本存储（测试可通过 monkeypatch 替换为独立实例）。
+store = PublishStore.from_env()
 
 
 @app.get("/healthz", tags=["meta"])
@@ -48,3 +57,21 @@ def export_openapi(request: ExportOpenApiRequest) -> ExportOpenApiResponse:
 def render_path_batch(request: RenderPathsRequest) -> RenderPathsResponse:
     """按路由模板与参数值反向生成可调用 URL（逐条报告错误，不中止批处理）。"""
     return render_paths(request.routes)
+
+
+@app.post("/publish", response_model=PublishResponse, tags=["publish"])
+def publish(request: PublishRequest) -> PublishResponse:
+    """校验候选路由集，并在 expected_version 等于当前版本时原子发布新版本。"""
+    return store.publish(request.routes, request.expected_version)
+
+
+@app.get("/active", response_model=ActiveResponse, response_model_by_alias=False, tags=["publish"])
+def active() -> ActiveResponse:
+    """读取当前活动版本的完整快照：路由、审计结果与 OpenAPI paths。"""
+    snapshot = store.get()
+    return ActiveResponse(
+        version=snapshot.version,
+        routes=snapshot.routes,
+        audit=snapshot.audit,
+        openapi_paths=snapshot.openapi_paths,
+    )
